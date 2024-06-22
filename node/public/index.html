@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket 语音合成</title>
+</head>
+
+<body>
+    <h1>WebSocket 语音合成</h1>
+    <textarea id="text" rows="4" cols="50" placeholder="请输入文本"></textarea><br>
+    <button id="speakButton">合成语音</button>
+    <audio id="audio" controls></audio>
+
+    <script>
+        const voiceMIME = 'audio/mpeg';
+        const voiceIns = new Audio();
+        let mediaSource = null;
+        let sourceBuffer = null;
+        const speechQueue = [];
+        let speechPushing = false;
+        let initializing = false;
+        let ws = null;
+        const reconnectInterval = 5000; // 重连间隔时间（毫秒）
+
+        // 动态获取当前服务器的主机名和端口号
+        const hostname = window.location.hostname;
+        const port = window.location.port;
+
+        // 判断是否使用安全的WebSocket连接
+        const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+
+        // 初始化 WebSocket 连接
+        const initWebSocket = () => {
+            ws = new WebSocket(`${protocol}://${hostname}:${port}`);
+
+            ws.onopen = () => {
+                console.log('WebSocket 连接已打开');
+            };
+
+            ws.onmessage = async (event) => {
+                const message = JSON.parse(event.data);
+                if (message.dataType === 'base64') {
+                    const arrayBuffer = base64ToArrayBuffer(message.data);
+                    speechQueue.push({ str: 'bin', buf: arrayBuffer });
+                    await processQueue();
+                } else if (message.dataType === 'string') {
+                    if (message.data.includes('Path:turn.start')) {
+                        speechQueue.push({ str: 'turn.start' });
+                        await processQueue();
+                    } else if (message.data.includes('Path:turn.end')) {
+                        speechQueue.push({ str: 'turn.end' });
+                        await processQueue();
+                    }
+                }
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket 连接已关闭，尝试重连...');
+                setTimeout(initWebSocket, reconnectInterval);
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket 连接发生错误:', error);
+                ws.close();
+            };
+        };
+
+        initWebSocket();
+
+        document.getElementById('speakButton').addEventListener('click', () => {
+            const text = document.getElementById('text').value;
+            const message = {
+                text: text,
+                lang: 'zh-CN',
+                voice: 'XiaoxiaoMultilingualNeural',
+                volume: 1,
+                rate: 1
+            };
+            ws.send(JSON.stringify(message));
+        });
+
+        // Base64 转 ArrayBuffer
+        const base64ToArrayBuffer = (base64) => {
+            const binaryString = atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        };
+
+        // 初始化 MediaSource 和 SourceBuffer
+        const initMediaSource = async () => {
+            if (mediaSource) {
+                cleanUpMediaSource();
+            }
+            initializing = true;
+            return new Promise((resolve) => {
+                mediaSource = new MediaSource();
+                voiceIns.src = URL.createObjectURL(mediaSource);
+                voiceIns.play();
+                mediaSource.addEventListener('sourceopen', () => {
+                    if (mediaSource.readyState === 'open') {
+                        sourceBuffer = mediaSource.addSourceBuffer(voiceMIME);
+                        sourceBuffer.addEventListener('updateend', () => {
+                            speechPushing = false;
+                            if (speechQueue.length > 0) {
+                                playNextInQueue();
+                            }
+                        });
+                        initializing = false;
+                        resolve();
+                    }
+                }, { once: true });
+            });
+        };
+
+        // 清理 MediaSource 和 SourceBuffer
+        const cleanUpMediaSource = () => {
+            if (sourceBuffer) {
+                sourceBuffer.removeEventListener('updateend', playNextInQueue);
+                if (sourceBuffer.buffered.length > 0) {
+                    sourceBuffer.remove(0, sourceBuffer.buffered.end(0));
+                }
+                sourceBuffer = null;
+            }
+            if (mediaSource) {
+                mediaSource.removeEventListener('sourceopen', initMediaSource);
+                mediaSource = null;
+            }
+            voiceIns.src = '';
+        };
+
+        // 处理队列
+        const processQueue = async () => {
+            if (speechQueue.length === 0 || initializing) return;
+            if (!mediaSource || mediaSource.readyState !== 'open') {
+                await initMediaSource();
+            }
+            playNextInQueue();
+        };
+
+        // 播放队列中的下一个音频片段
+        const playNextInQueue = () => {
+            if (speechQueue.length === 0 || speechPushing) return;
+            const { str, buf } = speechQueue.shift();
+            if (str === 'turn.start') {
+                console.log('播放开始');
+            } else if (str === 'turn.end') {
+                if (mediaSource.readyState === 'open') {
+                    mediaSource.endOfStream();
+                }
+                console.log('播放结束');
+                // 不要在这里清理
+            } else {
+                speechPushing = true;
+                try {
+                    sourceBuffer.appendBuffer(buf);
+                } catch (error) {
+                    console.error('appendBuffer 错误:', error);
+                    speechPushing = false;
+                }
+            }
+        };
+
+        // 监听音频播放结束事件，在真正播放结束时清理 MediaSource
+        voiceIns.addEventListener('ended', () => {
+            console.log('音频播放完全结束');
+            cleanUpMediaSource(); // 只有在音频播放完全结束时才清理
+        });
+    </script>
+</body>
+
+</html>
