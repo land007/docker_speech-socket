@@ -9,7 +9,6 @@ const config = require('./config'); // 引入配置文件
 const PORT = 80;
 const AZURE_TOKEN_URL = `https://${config.region}.api.cognitive.microsoft.com/sts/v1.0/issueToken`;
 const AZURE_WEBSOCKET_URL = `wss://${config.region}.tts.speech.microsoft.com/cognitiveservices/websocket/v1?Authorization=bearer%20`;
-const EXIST_VOICE = 3; // 假设 existVoice 为 3
 const HEARTBEAT_INTERVAL = 30 * 1000; // 30秒
 const TOKEN_REFRESH_INTERVAL = 5 * 60 * 1000; // 5分钟
 
@@ -30,7 +29,6 @@ const region = config.region;
 
 let azureWebSocket;
 let trustedClientToken = ''; // 用于存储获取的令牌
-let clients = [];
 
 // 更新 Azure 令牌的函数
 const updateAuthorizationToken = async () => {
@@ -76,33 +74,13 @@ const connectToAzureWebSocket = () => {
 
             // 连接成功时的处理
             azureWebSocket.onopen = (event) => {
-                console.log('Azure WebSocket连接已打开', event);
+                console.log('Azure WebSocket连接已打开');
                 resolve();
-            };
-
-            // 接收到消息时的处理
-            azureWebSocket.onmessage = (event) => {
-                console.log('收到Azure消息:', event.data);
-
-                if (event.data instanceof ArrayBuffer) {
-                    const base64Data = arrayBufferToBase64(event.data);
-                    clients.forEach(client => {
-                        if (client.readyState === WebSocket.OPEN) {
-                            client.send(JSON.stringify({ dataType: 'base64', data: base64Data }));
-                        }
-                    });
-                } else {
-                    clients.forEach(client => {
-                        if (client.readyState === WebSocket.OPEN) {
-                            client.send(JSON.stringify({ dataType: 'string', data: event.data }));
-                        }
-                    });
-                }
             };
 
             // 连接关闭时的处理
             azureWebSocket.onclose = (event) => {
-                console.log('Azure WebSocket连接已关闭', event);
+                console.log('Azure WebSocket连接已关闭');
                 reconnectAzureWebSocket();
             };
 
@@ -127,53 +105,27 @@ const reconnectAzureWebSocket = () => {
     }, 5000); // 5秒后重新连接
 };
 
-// 定义 getWSAudio 函数
-const getWSAudio = (date, requestId) => {
-    return EXIST_VOICE === 3
-        ? `Path: synthesis.context\r\nX-RequestId: ${requestId}\r\nX-Timestamp: ${date}\r\nContent-Type: application/json\r\n\r\n{"synthesis":{"audio":{"metadataOptions":{"sentenceBoundaryEnabled":false,"wordBoundaryEnabled":false},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}`
-        : `X-Timestamp:${date}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"true"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}`;
-};
-
-// 定义 getWSText 函数
-const getWSText = (date, requestId, lang, voice, volume, rate, pitch, style, role, msg) => {
-    let fmtVolume = volume === 1 ? "+0%" : volume * 100 - 100 + "%";
-    let fmtRate = (rate >= 1 ? "+" : "") + (rate * 100 - 100) + "%";
-    let fmtPitch = (pitch >= 1 ? "+" : "") + (pitch - 1) + "Hz";
-
-    if (EXIST_VOICE === 3) {
-        let fmtStyle = style ? ` style="${style}"` : "";
-        let fmtRole = role ? ` role="${role}"` : "";
-        let fmtExpress = fmtStyle + fmtRole;
-        return `Path: ssml\r\nX-RequestId: ${requestId}\r\nX-Timestamp: ${date}\r\nContent-Type: application/ssml+xml\r\n\r\n<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xmlns:mstts='https://www.w3.org/2001/mstts' xml:lang='${lang}'><voice name='${voice}'><mstts:express-as${fmtExpress}><prosody pitch='${fmtPitch}' rate='${fmtRate}' volume='${fmtVolume}'>${msg}</prosody></mstts:express-as></voice></speak>`;
-    } else {
-        return `X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${date}Z\r\nPath:ssml\r\n\r\n<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xmlns:mstts='https://www.w3.org/2001/mstts' xml:lang='${lang}'><voice name='${voice}'><prosody pitch='${fmtPitch}' rate='${fmtRate}' volume='${fmtVolume}'>${msg}</prosody></voice></speak>`;
-    }
-};
-
 // 修改 sendTextToSpeechRequest 函数
-const sendTextToSpeechRequest = (client, text, lang, voice, volume, rate) => {
+const sendTextToSpeechRequest = (client, message) => {
     if (azureWebSocket.readyState === WebSocket.OPEN) {
-        const requestId = uuidv4();
-        const timestamp = getTime();
-        const selectedStyle = null;
-        const audioRequest = getWSAudio(timestamp, requestId);
-        const ssmlRequest = getWSText(timestamp, requestId, lang, `Microsoft Server Speech Text to Speech Voice (${lang}, ${voice})`, volume, rate, 1, selectedStyle, null, text);
-
-        azureWebSocket.send(audioRequest);
-        azureWebSocket.send(ssmlRequest);
+        console.log('向Azure发送消息:', message.toString());
+        azureWebSocket.send(message.toString());
 
         // 处理 Azure WebSocket 的消息
         azureWebSocket.onmessage = (event) => {
             console.log('收到Azure消息:', event.data);
 
             if (event.data instanceof ArrayBuffer) {
-                const base64Data = arrayBufferToBase64(event.data);
+                // 直接转发二进制数据
                 if (client.readyState === WebSocket.OPEN) {
-                    client.send(JSON.stringify({ dataType: 'base64', data: base64Data }));
+                    console.log('转发二进制数据给客户端');
+                    client.send(event.data);
                 }
             } else {
+                // 直接转发文本数据
                 if (client.readyState === WebSocket.OPEN) {
-                    client.send(JSON.stringify({ dataType: 'string', data: event.data }));
+                    console.log('转发文本数据给客户端:', event.data);
+                    client.send(event.data);
                 }
             }
         };
@@ -186,26 +138,23 @@ const sendTextToSpeechRequest = (client, text, lang, voice, volume, rate) => {
 // 处理新的 WebSocket 连接
 wss.on('connection', (ws) => {
     console.log('客户端已连接');
-    clients.push(ws);
 
     ws.on('message', (message) => {
         console.log('收到客户端消息:', message);
-        const { text, lang, voice, volume, rate } = JSON.parse(message);
 
         if (!azureWebSocket || azureWebSocket.readyState !== WebSocket.OPEN) {
             connectToAzureWebSocket().then(() => {
-                sendTextToSpeechRequest(ws, text, lang, voice, volume, rate); // 传递客户端的WebSocket实例
+                sendTextToSpeechRequest(ws, message); // 传递客户端的WebSocket实例
             }).catch((error) => {
                 console.error('连接 Azure WebSocket 失败:', error);
             });
         } else {
-            sendTextToSpeechRequest(ws, text, lang, voice, volume, rate); // 传递客户端的WebSocket实例
+            sendTextToSpeechRequest(ws, message); // 传递客户端的WebSocket实例
         }
     });
 
     ws.on('close', () => {
         console.log('客户端已断开连接');
-        clients = clients.filter(client => client !== ws);
     });
 });
 
@@ -224,32 +173,6 @@ const startServer = async () => {
     } catch (error) {
         console.error('启动服务器错误:', error);
     }
-};
-
-// 辅助函数：生成 UUID
-const uuidv4 = () => {
-    let uuid = ([1e7] + 1e3 + 4e3 + 8e3 + 1e11).replace(/[018]/g, c =>
-        (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
-    );
-    return EXIST_VOICE === 3 ? uuid.toUpperCase() : uuid;
-};
-
-// 辅助函数：获取当前时间
-const getTime = () => {
-    return EXIST_VOICE === 3 ? new Date().toISOString() : new Date().toString();
-};
-
-// 辅助函数：将 ArrayBuffer 转换为 Base64 字符串
-const arrayBufferToBase64 = (buffer) => {
-    let binary = '';
-    let bytes = new Uint8Array(buffer);
-    let len = bytes.byteLength;
-
-    for (let i = 0; i < len; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-
-    return Buffer.from(binary, 'binary').toString('base64');
 };
 
 // 定期发送心跳消息以保持 WebSocket 连接
