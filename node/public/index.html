@@ -1,177 +1,204 @@
 <!DOCTYPE html>
-<html lang="en">
-
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WebSocket 语音合成</title>
 </head>
-
 <body>
     <h1>WebSocket 语音合成</h1>
-    <textarea id="text" rows="4" cols="50" placeholder="请输入文本"></textarea><br>
+    <textarea id="text" rows="4" cols="50" placeholder="请输入文本">西西你的小姑姑要来了</textarea><br>
     <button id="speakButton">合成语音</button>
     <audio id="audio" controls></audio>
 
     <script>
+        let webSocket;
+        let voiceIns = document.getElementById('audio');
+        const reconnectInterval = 5000;
         const voiceMIME = 'audio/mpeg';
-        const voiceIns = new Audio();
-        let mediaSource = null;
-        let sourceBuffer = null;
+        
+        let mediaSource;
+        let sourceBuffer;
         const speechQueue = [];
         let speechPushing = false;
-        let initializing = false;
-        let ws = null;
-        const reconnectInterval = 5000; // 重连间隔时间（毫秒）
+        let isPlaying = false;
 
-        // 动态获取当前服务器的主机名和端口号
-        const hostname = window.location.hostname;
-        const port = window.location.port;
-
-        // 判断是否使用安全的WebSocket连接
-        const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-
-        // 初始化 WebSocket 连接
-        const initWebSocket = () => {
-            ws = new WebSocket(`${protocol}://${hostname}:${port}`);
-
-            ws.onopen = () => {
-                console.log('WebSocket 连接已打开');
-            };
-
-            ws.onmessage = async (event) => {
-                const message = JSON.parse(event.data);
-                if (message.dataType === 'base64') {
-                    const arrayBuffer = base64ToArrayBuffer(message.data);
-                    speechQueue.push({ str: 'bin', buf: arrayBuffer });
-                    await processQueue();
-                } else if (message.dataType === 'string') {
-                    if (message.data.includes('Path:turn.start')) {
-                        speechQueue.push({ str: 'turn.start' });
-                        await processQueue();
-                    } else if (message.data.includes('Path:turn.end')) {
-                        speechQueue.push({ str: 'turn.end' });
-                        await processQueue();
-                    }
+        speechQueue.push = function (arrayBuffer) {
+            const processBuffer = () => {
+                if (!speechPushing && mediaSource && mediaSource.readyState === 'open' && sourceBuffer && !sourceBuffer.updating) {
+                    appendSourceBuffer(arrayBuffer);
+                } else {
+                    Array.prototype.push.call(this, arrayBuffer);
                 }
             };
 
-            ws.onclose = () => {
-                console.log('WebSocket 连接已关闭，尝试重连...');
-                setTimeout(initWebSocket, reconnectInterval);
-            };
-
-            ws.onerror = (error) => {
-                console.error('WebSocket 连接发生错误:', error);
-                ws.close();
-            };
+            if (mediaSource === undefined || sourceBuffer === undefined) {
+                initMediaSource().then(processBuffer);
+            } else {
+                processBuffer();
+            }
         };
 
-        initWebSocket();
+        const hostname = window.location.hostname;
+        const port = window.location.port;
+        const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
 
-        document.getElementById('speakButton').addEventListener('click', () => {
-            const text = document.getElementById('text').value;
-            const message = {
-                text: text,
-                lang: 'zh-CN',
-                voice: 'XiaoxiaoMultilingualNeural',
-                volume: 1,
-                rate: 1
-            };
-            ws.send(JSON.stringify(message));
-        });
+        const connectToWebSocket = () => {
+            return new Promise((resolve, reject) => {
+                if (!webSocket || webSocket.readyState > 1) {
+                    webSocket = new WebSocket(`${protocol}://${hostname}:${port}`);
+                    webSocket.binaryType = "arraybuffer";
 
-        // Base64 转 ArrayBuffer
-        const base64ToArrayBuffer = (base64) => {
-            const binaryString = atob(base64);
-            const len = binaryString.length;
-            const bytes = new Uint8Array(len);
-            for (let i = 0; i < len; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-            return bytes.buffer;
-        };
-
-        // 初始化 MediaSource 和 SourceBuffer
-        const initMediaSource = async () => {
-            if (mediaSource) {
-                cleanUpMediaSource();
-            }
-            initializing = true;
-            return new Promise((resolve) => {
-                mediaSource = new MediaSource();
-                voiceIns.src = URL.createObjectURL(mediaSource);
-                voiceIns.play();
-                mediaSource.addEventListener('sourceopen', () => {
-                    if (mediaSource.readyState === 'open') {
-                        sourceBuffer = mediaSource.addSourceBuffer(voiceMIME);
-                        sourceBuffer.addEventListener('updateend', () => {
-                            speechPushing = false;
-                            if (speechQueue.length > 0) {
-                                playNextInQueue();
-                            }
-                        });
-                        initializing = false;
+                    webSocket.onopen = (event) => {
+                        console.log('WebSocket连接已打开', event);
                         resolve();
-                    }
-                }, { once: true });
+                    };
+
+                    webSocket.onmessage = async (event) => {
+                        console.log('收到消息:', event.data);
+                        if (event.data instanceof ArrayBuffer) {
+                            console.log('收到二进制消息');
+                            const arrayBuffer = event.data;
+                            speechQueue.push(arrayBuffer);
+                        } else {
+                            console.log('收到文本消息:', event.data);
+                            const message = event.data;
+                            if (message.includes('Path:turn.start')) {
+                                console.log('appendSourceBuffer turn.start');
+                                await initMediaSource();
+                            } else if (message.includes('Path:turn.end')) {
+                                console.log('appendSourceBuffer turn.end');
+                                if (!isPlaying && speechQueue.length > 0) {
+                                    playNextAudio();
+                                }
+                            }
+                        }
+                    };
+
+                    webSocket.onclose = (event) => {
+                        console.log('WebSocket连接已关闭，尝试重连...');
+                        setTimeout(connectToWebSocket, reconnectInterval);
+                    };
+
+                    webSocket.onerror = (error) => {
+                        console.error('WebSocket连接发生错误:', error);
+                        webSocket.close();
+                        reject(error);
+                    };
+                } else {
+                    resolve();
+                }
             });
         };
 
-        // 清理 MediaSource 和 SourceBuffer
-        const cleanUpMediaSource = () => {
-            if (sourceBuffer) {
-                sourceBuffer.removeEventListener('updateend', playNextInQueue);
-                if (sourceBuffer.buffered.length > 0) {
-                    sourceBuffer.remove(0, sourceBuffer.buffered.end(0));
-                }
-                sourceBuffer = null;
-            }
-            if (mediaSource) {
-                mediaSource.removeEventListener('sourceopen', initMediaSource);
-                mediaSource = null;
-            }
-            voiceIns.src = '';
-        };
+        const initMediaSource = async () => {
+            console.log('initMediaSource();');
+            sourceBuffer = void 0;
+            mediaSource = new MediaSource();
+            console.log('mediaSource = new MediaSource();');
+            voiceIns.src = URL.createObjectURL(mediaSource);
 
-        // 处理队列
-        const processQueue = async () => {
-            if (speechQueue.length === 0 || initializing) return;
-            if (!mediaSource || mediaSource.readyState !== 'open') {
-                await initMediaSource();
-            }
-            playNextInQueue();
-        };
+            await new Promise((resolve) => {
+                mediaSource.addEventListener('sourceopen', resolve);
+            });
 
-        // 播放队列中的下一个音频片段
-        const playNextInQueue = () => {
-            if (speechQueue.length === 0 || speechPushing) return;
-            const { str, buf } = speechQueue.shift();
-            if (str === 'turn.start') {
-                console.log('播放开始');
-            } else if (str === 'turn.end') {
-                if (mediaSource.readyState === 'open') {
+            if (!sourceBuffer) {
+                sourceBuffer = mediaSource.addSourceBuffer(voiceMIME);
+            }
+
+            sourceBuffer.addEventListener('updateend', async () => {
+                speechPushing = false;
+
+                if (speechQueue.length > 0) {
+                    const nextArrayBuffer = speechQueue.shift();
+                    await appendSourceBuffer(nextArrayBuffer);
+                } else if (!isPlaying) {
                     mediaSource.endOfStream();
                 }
-                console.log('播放结束');
-                // 不要在这里清理
-            } else {
+            });
+
+            isPlaying = false;
+        };
+
+        const appendSourceBuffer = async (arrayBuffer) => {
+            if (sourceBuffer && !sourceBuffer.updating) {
+                sourceBuffer.appendBuffer(new Uint8Array(arrayBuffer));
                 speechPushing = true;
-                try {
-                    sourceBuffer.appendBuffer(buf);
-                } catch (error) {
-                    console.error('appendBuffer 错误:', error);
-                    speechPushing = false;
-                }
             }
         };
 
-        // 监听音频播放结束事件，在真正播放结束时清理 MediaSource
-        voiceIns.addEventListener('ended', () => {
-            console.log('音频播放完全结束');
-            cleanUpMediaSource(); // 只有在音频播放完全结束时才清理
+        const playNextAudio = async () => {
+            if (speechQueue.length > 0 && !isPlaying) {
+                const arrayBuffer = speechQueue.shift();
+                await appendSourceBuffer(arrayBuffer);
+                voiceIns.play();
+                isPlaying = true;
+            }
+        };
+
+        voiceIns.onended = () => {
+            console.log('音频播放结束');
+            isPlaying = false;
+            if (speechQueue.length > 0) {
+                playNextAudio();
+            }
+        };
+
+        voiceIns.onerror = (error) => {
+            console.error('音频播放错误:', error);
+            isPlaying = false;
+            if (speechQueue.length > 0) {
+                playNextAudio();
+            }
+        };
+
+        const getWSAudio = (date, requestId) => {
+            return `X-Timestamp:${date}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"true"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}`;
+        };
+
+        const getWSText = (date, requestId, lang, voice, volume, rate, pitch, style, role, msg) => {
+            let fmtVolume = volume === 1 ? "+0%" : volume * 100 - 100 + "%";
+            let fmtRate = (rate >= 1 ? "+" : "") + (rate * 100 - 100) + "%";
+            let fmtPitch = (pitch >= 1 ? "+" : "") + (pitch - 1) + "Hz";
+            return `X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nX-Timestamp:${date}Z\r\nPath:ssml\r\n\r\n<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xmlns:mstts='https://www.w3.org/2001/mstts' xml:lang='${lang}'><voice name='${voice}'><prosody pitch='${fmtPitch}' rate='${fmtRate}' volume='${fmtVolume}'>${msg}</prosody></voice></speak>`;
+        };
+
+        const uuidv4 = () => {
+            return ([1e7] + 1e3 + 4e3 + 8e3 + 1e11).replace(/[018]/g, c =>
+                (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+            );
+        };
+
+        const getTime = () => {
+            return new Date().toISOString();
+        };
+
+        const sendTextToSpeechRequest = (text, lang, voice, volume, rate) => {
+            if (webSocket.readyState === WebSocket.OPEN) {
+                const requestId = uuidv4();
+                const timestamp = getTime();
+
+                const audioRequest = getWSAudio(timestamp, requestId);
+                webSocket.send(audioRequest);
+
+                const ssmlRequest = getWSText(timestamp, requestId, lang, `Microsoft Server Speech Text to Speech Voice (${lang}, ${voice})`, volume, rate, 1, null, null, text);
+                webSocket.send(ssmlRequest);
+            } else {
+                console.error('WebSocket is not open. Unable to send text to speech request.');
+            }
+        };
+
+        const speakButton = document.getElementById('speakButton');
+        speakButton.addEventListener('click', () => {
+            const text = document.getElementById('text').value;
+            if (webSocket.readyState === WebSocket.OPEN) {
+                sendTextToSpeechRequest(text, 'zh-CN', 'XiaoxiaoMultilingualNeural', 1, 1);
+            } else {
+                console.error('WebSocket 连接未打开');
+            }
         });
+
+        connectToWebSocket();
     </script>
 </body>
-
 </html>
