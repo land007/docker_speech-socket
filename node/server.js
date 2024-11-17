@@ -113,12 +113,12 @@ const sendTextToSpeechRequest = (client, message) => {
 
         // 处理 Azure WebSocket 的消息
         azureWebSocket.onmessage = (event) => {
-            console.log('收到Azure消息:', event.data);
+            //console.log('收到Azure消息:', event.data);
 
             if (event.data instanceof ArrayBuffer) {
                 // 直接转发二进制数据
                 if (client.readyState === WebSocket.OPEN) {
-                    console.log('转发二进制数据给客户端');
+                    //console.log('转发二进制数据给客户端');
                     client.send(event.data);
                 }
             } else {
@@ -131,7 +131,7 @@ const sendTextToSpeechRequest = (client, message) => {
         };
 
     } else {
-        console.error('Azure WebSocket is not open. Unable to send text to speech request.');
+        console.error('Azure WebSocket is not open. Unable to send text to speech request.', azureWebSocket.readyState);
     }
 };
 
